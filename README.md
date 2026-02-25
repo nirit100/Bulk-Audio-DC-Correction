@@ -2,6 +2,8 @@
 
 A small Python tool for correcting **DC offset** and **amplitude asymmetry** in audio files.
 
+It is a pure terminal application at the moment. Requires Python and has some dependencies (see [here](requirements.txt)).
+
 ## The Problem
 
 ### DC Offset (Additive Bias)
