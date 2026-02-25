@@ -67,7 +67,7 @@ I will probably do a complete packaging later. Maybe. Who knows.
 | `--method {mean,median}` | `median` | DC offset estimation method (median is more robust to outliers) |
 | `--symmetry {none,phase,rms,peak}` | `none` | Symmetry correction: `none` (disabled), `phase` (Hilbert transform, no distortion), `rms`/`peak` (amplitude scaling, can distort) |
 | `--symmetry-strength` | `1.0` | Strength of symmetry correction (0..1) |
-| `--smoothing` | `0.5` | Smoothing factor for blending near zero crossings (rms/peak modes only). Window = smoothing × sample_rate / 1000 samples |
+| `--smoothing` | `0.5` | Smoothing factor for blending near zero crossings (rms/peak asymmetry correction modes only). Window = smoothing × sample_rate / 1000 samples. |
 | `--threshold-db` | `-70` | Gate threshold in dB |
 | `--no-gate` | off | Disable gate and use all samples |
 
