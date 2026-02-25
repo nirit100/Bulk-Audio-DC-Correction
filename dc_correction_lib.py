@@ -41,6 +41,30 @@ class ChannelStats:
 
 
 @dataclass
+class SymmetryCorrectionInfo:
+    """Details about symmetry correction applied per channel."""
+    mode: str = 'none'  # 'none', 'rms', 'peak', 'phase'
+    # Phase mode fields
+    theta_rad: float = 0.0  # Applied rotation angle in radians
+    theta_deg: float = 0.0  # Applied rotation angle in degrees
+    computed_theta_rad: float = 0.0  # Computed angle before strength scaling
+    # Scale mode fields
+    raw_scale: float = 1.0  # pos_metric / neg_metric ratio
+    scale_pos: float = 1.0  # Scale factor applied to positive samples
+    scale_neg: float = 1.0  # Scale factor applied to negative samples
+    # Scale mode statistics (actual per-sample scale distribution)
+    scale_min: float = 1.0  # Minimum per-sample scale applied
+    scale_max: float = 1.0  # Maximum per-sample scale applied
+    scale_mean: float = 1.0  # Mean per-sample scale applied
+    scale_std: float = 0.0  # Std dev of per-sample scale
+    # Blend statistics (shows zero-crossing adaptive smoothing behavior)
+    blend_mean: float = 0.5  # Mean blend factor (0=neg, 1=pos, 0.5=even mix)
+    blend_std: float = 0.0  # Std dev of blend factor
+    hard_switch_pct: float = 100.0  # % samples with hard switching (blend <0.01 or >0.99)
+    smoothed_pct: float = 0.0  # % samples in transition zone (0.01 <= blend <= 0.99)
+
+
+@dataclass
 class ProcessingResult:
     """Complete result from audio processing."""
     audio: np.ndarray
@@ -63,6 +87,9 @@ class ProcessingResult:
     # Pre/post stats per channel
     pre_stats: list[ChannelStats] = field(default_factory=list)
     post_stats: list[ChannelStats] = field(default_factory=list)
+
+    # Symmetry correction details per channel
+    symmetry_info: list[SymmetryCorrectionInfo] = field(default_factory=list)
 
     @property
     def num_channels(self) -> int:
@@ -273,7 +300,7 @@ def apply_symmetry_correction(
     strength: float = 1.0,
     smoothing: float = 0.5,
     sample_rate: int = 48000
-) -> np.ndarray:
+) -> tuple[np.ndarray, list[SymmetryCorrectionInfo]]:
     """
     Apply symmetry correction to balance positive/negative amplitudes.
 
@@ -289,13 +316,15 @@ def apply_symmetry_correction(
         sample_rate: Audio sample rate
 
     Returns:
-        Corrected audio (same shape)
+        Tuple of (corrected audio, list of SymmetryCorrectionInfo per channel)
     """
+    nch = audio.shape[1]
+    info_list = [SymmetryCorrectionInfo(mode=mode) for _ in range(nch)]
+
     if mode == 'none' or strength <= 0:
-        return audio.copy()
+        return audio.copy(), info_list
 
     arr = audio.copy()
-    nch = arr.shape[1]
 
     for ch in range(nch):
         ch_arr = arr[:, ch]
@@ -314,6 +343,7 @@ def apply_symmetry_correction(
             continue
 
         scale = pos_metric / neg_metric
+        info_list[ch].raw_scale = scale
 
         # Compute effective scale factors with strength applied
         eff_scale_neg = 1.0 + strength * (scale - 1.0)
@@ -336,6 +366,9 @@ def apply_symmetry_correction(
         else:
             scale_pos, scale_neg = 1.0, 1.0
 
+        info_list[ch].scale_pos = scale_pos
+        info_list[ch].scale_neg = scale_neg
+
         # Scale smoothing by correction magnitude: small correction = less smoothing needed
         scale_diff = abs(scale_pos - scale_neg)
         effective_smoothing = smoothing * min(1.0, scale_diff * 2.0)  # Full at diff >= 0.5
@@ -344,9 +377,24 @@ def apply_symmetry_correction(
         blend = compute_adaptive_blend(ch_arr, effective_smoothing, sample_rate)
 
         per_sample_scale = scale_pos * blend + scale_neg * (1.0 - blend)
+
+        # Record scale statistics
+        info_list[ch].scale_min = float(per_sample_scale.min())
+        info_list[ch].scale_max = float(per_sample_scale.max())
+        info_list[ch].scale_mean = float(per_sample_scale.mean())
+        info_list[ch].scale_std = float(per_sample_scale.std())
+
+        # Record blend statistics (zero-crossing smoothing behavior)
+        info_list[ch].blend_mean = float(blend.mean())
+        info_list[ch].blend_std = float(blend.std())
+        n_samples = len(blend)
+        hard_count = np.sum((blend < 0.01) | (blend > 0.99))
+        info_list[ch].hard_switch_pct = 100.0 * hard_count / n_samples if n_samples > 0 else 100.0
+        info_list[ch].smoothed_pct = 100.0 - info_list[ch].hard_switch_pct
+
         arr[:, ch] = ch_arr * per_sample_scale
 
-    return arr
+    return arr, info_list
 
 
 def apply_phase_rotation(
@@ -354,7 +402,7 @@ def apply_phase_rotation(
     mask: np.ndarray,
     mode: str = 'rms',
     strength: float = 1.0,
-) -> np.ndarray:
+) -> tuple[np.ndarray, list[SymmetryCorrectionInfo]]:
     """
     Apply phase rotation to balance positive/negative amplitudes.
 
@@ -368,13 +416,15 @@ def apply_phase_rotation(
         strength: Correction strength 0..1 (interpolate between 0 and optimal angle)
 
     Returns:
-        Phase-rotated audio (same shape)
+        Tuple of (phase-rotated audio, list of SymmetryCorrectionInfo per channel)
     """
+    nch = audio.shape[1]
+    info_list = [SymmetryCorrectionInfo(mode='phase') for _ in range(nch)]
+
     if strength <= 0:
-        return audio.copy()
+        return audio.copy(), info_list
 
     arr = audio.copy()
-    nch = arr.shape[1]
 
     for ch in range(nch):
         ch_arr = arr[:, ch]
@@ -425,10 +475,15 @@ def apply_phase_rotation(
         # Apply strength (interpolate between 0 and optimal angle)
         theta = optimal_theta * strength
 
+        # Store info
+        info_list[ch].computed_theta_rad = optimal_theta
+        info_list[ch].theta_rad = theta
+        info_list[ch].theta_deg = np.degrees(theta)
+
         # Apply rotation: y = x*cos(θ) - H(x)*sin(θ)
         arr[:, ch] = ch_arr * np.cos(theta) - hilbert_component * np.sin(theta)
 
-    return arr
+    return arr, info_list
 
 
 # =============================================================================
@@ -484,15 +539,16 @@ def process_audio(
     corrected = audio - dc[None, :]
 
     # Apply symmetry correction
+    symmetry_info = [SymmetryCorrectionInfo(mode='none') for _ in range(nch)]
     if symmetry != 'none' and symmetry_strength > 0:
         if symmetry == 'phase':
             # Phase rotation - no harmonic distortion
-            corrected = apply_phase_rotation(
+            corrected, symmetry_info = apply_phase_rotation(
                 corrected, mask, mode='rms', strength=symmetry_strength
             )
         else:
             # Amplitude scaling (rms/peak modes)
-            corrected = apply_symmetry_correction(
+            corrected, symmetry_info = apply_symmetry_correction(
                 corrected, mask, symmetry, symmetry_strength, smoothing,
                 sample_rate=sample_rate or 48000
             )
@@ -531,6 +587,7 @@ def process_audio(
         total_samples=total_samples,
         pre_stats=pre_stats,
         post_stats=post_stats,
+        symmetry_info=symmetry_info,
     )
 
 
@@ -588,7 +645,7 @@ def format_report(result: ProcessingResult, path: str = "") -> str:
     gate_str = 'on' if result.use_gate else 'off'
     lines.append(f" DC method: {result.method}  Symmetry correction: {result.symmetry}  Gate: {gate_str} ({result.threshold_db} dB)")
 
-    # Per-channel asymmetry
+    # Per-channel asymmetry and symmetry correction details
     for i, (post, pre) in enumerate(zip(result.post_stats, result.pre_stats)):
         ch_label = "mono" if result.is_mono else f"ch{i}"
         post_a, pre_a = post.asymmetry, pre.asymmetry
@@ -597,5 +654,16 @@ def format_report(result: ProcessingResult, path: str = "") -> str:
         lines.append(f"  mean-abs pos/neg: {format_value(post_a.pos_meanabs)} / {format_value(post_a.neg_meanabs)}  ratio={format_value(post_a.ratio_meanabs)} ({post_a.ratio_meanabs_db:+.2f} dB) (previously {pre_a.ratio_meanabs_db:+.2f} dB)")
         lines.append(f"  rms      pos/neg: {format_value(post_a.pos_rms)} / {format_value(post_a.neg_rms)}  ratio={format_value(post_a.ratio_rms)} ({post_a.ratio_rms_db:+.2f} dB) (previously {pre_a.ratio_rms_db:+.2f} dB)")
         lines.append(f"  peak     pos/neg: {format_value(post_a.pos_peak)} / {format_value(post_a.neg_peak)}  ratio={format_value(post_a.ratio_peak)} ({post_a.ratio_peak_db:+.2f} dB) (previously {pre_a.ratio_peak_db:+.2f} dB)")
+
+        # Symmetry correction details for this channel
+        if result.symmetry != 'none' and result.symmetry_info and i < len(result.symmetry_info):
+            sym_info = result.symmetry_info[i]
+            if sym_info.mode == 'phase':
+                lines.append(f"  symmetry (phase): theta={sym_info.theta_deg:+.2f}° ({sym_info.theta_rad:+.4f} rad)  computed={np.degrees(sym_info.computed_theta_rad):+.2f}°")
+            elif sym_info.mode in ('rms', 'peak'):
+                raw_db = to_db(sym_info.raw_scale)
+                lines.append(f"  symmetry ({sym_info.mode}): raw_ratio={sym_info.raw_scale:.4f} ({raw_db:+.2f} dB)  scale_pos={sym_info.scale_pos:.4f}  scale_neg={sym_info.scale_neg:.4f}")
+                lines.append(f"   applied scale: min={sym_info.scale_min:.4f}  max={sym_info.scale_max:.4f}  mean={sym_info.scale_mean:.4f}  std={sym_info.scale_std:.4f}")
+                lines.append(f"   blend (0=neg,1=pos): mean={sym_info.blend_mean:.3f}  std={sym_info.blend_std:.3f}  hard={sym_info.hard_switch_pct:.1f}%  smoothed={sym_info.smoothed_pct:.1f}%")
 
     return "\n".join(lines)
