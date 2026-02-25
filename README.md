@@ -1,73 +1,77 @@
 # DC Offset & Asymmetry Correction
 
-A Python tool for correcting **DC offset** and **amplitude asymmetry** in audio files — two common issues in bass recordings that can cause problems during mixing and mastering.
+A small Python tool for correcting **DC offset** and **amplitude asymmetry** in audio files.
 
 ## The Problem
 
 ### DC Offset (Additive Bias)
+
 When the audio waveform isn't centered around zero. This can be caused by:
 - Faulty recording equipment or ADC converters
 - Analog hardware with calibration drift
 - Some synthesizers and audio interfaces
+- Magic or bad luck
 
 **Consequences:** Reduced headroom, clicks at edit points, asymmetric clipping, issues with some plugins.
 
-```
-  With DC offset:          After correction:
-       ~~~~                     ~~~~
-    ──────────  0            ────────── 0
-       ~~~~                     ~~~~
-  (shifted up)               (centered)
-```
+Top: Negative DC offset, Bottom: Same audio after running `python .\dc_offset_correction.py file.wav`
+<img width="1024" height="348" alt="image" src="https://github.com/user-attachments/assets/57843f8e-ad60-40d2-9661-8023c43ad98f" />
+
+As long as no clipping is involved, this correction is pretty easy to do and more or less perfect.
 
 ### Amplitude Asymmetry (Multiplicative Bias)
+
 When positive amplitudes are consistently larger (or smaller) than negative ones. Common in:
 - Bass guitar with asymmetric pickup response
 - Recordings through transformer-based preamps
 - Some speaker/microphone combinations
+- Magic or bad luck
 
-**Consequences:** Wasted headroom (peak meters show higher than perceived loudness), potential for asymmetric distortion.
+**Consequences:** Wasted headroom (peak meters show higher than perceived loudness), potential for asymmetric distortion, mastering engineer will have a bad day.
 
-```
-  Asymmetric:               After correction:
-      ▲▲▲                       ▲▲▲
-   ────────  0               ────────  0
-       ▼                        ▼▼▼
-  (pos > neg)               (balanced)
-```
+Top: Bass signal with asymmatric amplitude, Bottom: Same audio after running `python .\dc_offset_correction.py --symmetry rms file.wav`:
+<img width="945" height="297" alt="image" src="https://github.com/user-attachments/assets/5ec7aa49-42c9-4e4d-b9e1-6e96d5917a2c" />
+
+Use this with caution. The correction algorithms I provide are very basic and are good enough for me, but they may introduce subtle artifacts.
 
 ## Features
 
 - **DC offset removal** using mean or median estimation
-- **Symmetry correction** to balance positive/negative amplitudes (RMS or peak-based)
-- **Gated analysis** — ignores quiet sections for more accurate estimation
-- **Smooth blending** — avoids distortion at zero crossings
+- Optional **Symmetry correction** to balance positive/negative amplitudes (RMS or peak-based)
+- **Gated analysis** — ignores quiet sections for more accurate estimation, parameterized threshold
+- **Smooth blending** — avoids distortion at zero crossings when correcting asymmetry
 - **Dry-run mode** — preview diagnostics without writing files
 - **Preserves audio format** — maintains sample rate, bit depth, and file format
 
-## Installation
+## Installation & Usage
+
+First, clone the repository. 
+
+Then isnstall dependencies:
 
 ```bash
-pip install numpy soundfile
+pip install -r requirements.txt
 ```
 
-## Usage
+To run the program:
 
 ```bash
 python dc_offset_correction.py [options] <files...>
 ```
 
+I will probably do a complete packaging later. Maybe. Who knows.
+
 ### Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--dry-run` | off | Print diagnostics without writing files |
-| `--method {mean,median}` | `median` | DC estimation method (median is robust to outliers) |
-| `--symmetry {none,rms,peak}` | `none` | Balance pos/neg amplitudes by RMS or peak |
-| `--symmetry-strength` | `1.0` | Correction strength (0.0–1.0) |
-| `--smoothing` | `0.02` | Transition width near zero crossings |
+| `--dry-run` | off | Print stats but do not actually write files |
+| `--method {mean,median}` | `median` | DC offset estimation method (median is more robust to outliers) |
+| `--symmetry {none,rms,peak}` | `none` | DC asymmetry estimation and correction method (pick "none" to disable symmetry correction) |
+| `--symmetry-strength` | `1.0` | Strength of symmetry correction (recommended range is 0..1) |
+| `--smoothing` | `0.02` | Amplitude range for symmetry blending near zero, as fraction of full-scale (mitigates kink when symmetry correcting, disable with 0.0, be careful with bigger values on quiet audio) (0..1) |
 | `--threshold-db` | `-70` | Gate threshold in dB |
-| `--no-gate` | off | Use all samples (disable gating) |
+| `--no-gate` | off | Disable gate and use all samples (basically sets threshold-db to -inf) |
 
 ## Examples
 
@@ -86,16 +90,6 @@ python dc_offset_correction.py --dry-run *.wav
 python dc_offset_correction.py --symmetry rms track.wav
 ```
 
-### Batch process bass tracks recursively (PowerShell)
-```powershell
-python dc_offset_correction.py --dry-run (Get-ChildItem -Path ./Cut -Recurse -Filter "*_Bass (Mono).wav").FullName
-```
-
-### Batch process (Bash/Zsh)
-```bash
-python dc_offset_correction.py --dry-run $(find ./Cut -name "*_Bass (Mono).wav")
-```
-
 ### Conservative symmetry correction
 ```bash
 python dc_offset_correction.py --symmetry rms --symmetry-strength 0.5 bass.wav
@@ -104,17 +98,33 @@ python dc_offset_correction.py --symmetry rms --symmetry-strength 0.5 bass.wav
 ## Example Output
 
 ```
-File: Cut/Song_Bass (Mono).wav
+$ python3 ./dc_offset_correction.py --symmetry rms --method mean --dry-run "Djembe (Mono).wav" "Drums (Stereo).wav"
+File: Djembe (Mono).wav
  SR: 48000
- Pre-mean: 0.002341  Pre-peak: 0.847623
- Gated-samples: 1847234 (85.23%)  DC used: 0.002298
- Post-mean: 0.000043  Post-peak: 0.845325
- DC method: median  Symmetry correction: none  Gate: on (-70.0 dB)
- Asymmetry mono: pos_count=923617 neg_count=923617 (previously pos=924521 neg=922713)
-  mean-abs pos/neg: 0.142851 / 0.142847  ratio=1.000028 (+0.00 dB) (previously +0.12 dB)
-  rms      pos/neg: 0.198234 / 0.198229  ratio=1.000025 (+0.00 dB) (previously +0.15 dB)
-  peak     pos/neg: 0.845312 / 0.845325  ratio=0.999985 (-0.00 dB) (previously +0.31 dB)
-Processed Cut/Song_Bass (Mono).wav -> Cut/Song_Bass (Mono) (DC-Corrected).wav
+ Pre-mean: -0.000001  Pre-peak: 0.025983
+ Gated-samples: 12000138 (80.257745%)  DC used: -0.000000
+ Post-mean: 0.000000  Post-peak: 0.026052
+ DC method: mean  Symmetry correction: rms  Gate: on (-70.0 dB)
+ Asymmetry mono: pos_count=6005700 neg_count=5994438 (previously pos=6005700 neg=5994438)
+  mean-abs pos/neg: 0.001838 / 0.001840  ratio=0.998547 (-0.01 dB) (previously -0.02 dB)
+  rms      pos/neg: 0.002371 / 0.002376  ratio=0.997787 (-0.02 dB) (previously -0.03 dB)
+  peak     pos/neg: 0.026052 / 0.021343  ratio=1.220642 (+1.73 dB) (previously +1.71 dB)
+Dry-run: would write Djembe (Mono) (DC-Corrected).wav
+File: Drums (Stereo).wav
+ SR: 48000
+ Pre-mean: -0.000001, -0.000001  Pre-peak: 0.831722, 0.914206
+ Gated-samples: 8730364, 8910128 (58.389272, 59.591546%)  DC used: 0.000000, -0.000000
+ Post-mean: 0.000093, 0.000057  Post-peak: 0.831722, 0.914205
+ DC method: mean  Symmetry correction: rms  Gate: on (-70.0 dB)
+ Asymmetry ch0: pos_count=4422471 neg_count=4307893 (previously pos=4422471 neg=4307893)
+  mean-abs pos/neg: 0.021578 / 0.021827  ratio=0.988619 (-0.10 dB) (previously -0.23 dB)
+  rms      pos/neg: 0.044165 / 0.044177  ratio=0.999719 (-0.00 dB) (previously -0.15 dB)
+  peak     pos/neg: 0.676836 / 0.831722  ratio=0.813777 (-1.79 dB) (previously -1.94 dB)
+ Asymmetry ch1: pos_count=4498187 neg_count=4411941 (previously pos=4498187 neg=4411941)
+  mean-abs pos/neg: 0.024570 / 0.024856  ratio=0.988496 (-0.10 dB) (previously -0.17 dB)
+  rms      pos/neg: 0.049589 / 0.049595  ratio=0.999883 (-0.00 dB) (previously -0.08 dB)
+  peak     pos/neg: 0.743941 / 0.914205  ratio=0.813757 (-1.79 dB) (previously -1.87 dB)
+Dry-run: would write Drums (Stereo) (DC-Corrected).wav
 ```
 
 ## How It Works
@@ -123,7 +133,7 @@ Processed Cut/Song_Bass (Mono).wav -> Cut/Song_Bass (Mono) (DC-Corrected).wav
 2. **DC Estimation**: Calculates the median (or mean) of gated samples as the DC offset
 3. **DC Removal**: Subtracts the estimated DC from all samples
 4. **Symmetry Analysis**: Computes RMS or peak of positive vs negative samples
-5. **Symmetry Correction**: Scales one side to match the other, using smooth tanh blending near zero to avoid discontinuities
+5. **Symmetry Correction**: Scales one side to match the other, using smooth tanh blending near zero to avoid discontinuities -- this is the part that is not perfect!
 6. **Clipping**: Output is clipped to [-1, 1] to prevent overflow
 
 ## Testing
@@ -135,4 +145,4 @@ python -m pytest test_dc_correction.py -v
 
 ## License
 
-MIT
+GPL3
