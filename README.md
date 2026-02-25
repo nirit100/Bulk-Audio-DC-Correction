@@ -67,7 +67,7 @@ I will probably do a complete packaging later. Maybe. Who knows.
 | `--method {mean,median}` | `median` | DC offset estimation method (median is more robust to outliers) |
 | `--symmetry {none,phase,rms,peak}` | `none` | Symmetry correction: `none` (disabled), `phase` (Hilbert transform, no distortion), `rms`/`peak` (amplitude scaling, can distort) |
 | `--symmetry-strength` | `1.0` | Strength of symmetry correction (0..1) |
-| `--smoothing` | `0.02` | Amplitude range for blending near zero (rms/peak modes only) |
+| `--smoothing` | `0.5` | Smoothing factor for blending near zero crossings (rms/peak modes only). Window = smoothing × sample_rate / 1000 samples |
 | `--threshold-db` | `-70` | Gate threshold in dB |
 | `--no-gate` | off | Disable gate and use all samples |
 
@@ -100,9 +100,10 @@ python dc_offset_correction.py --symmetry phase "bass (DC-Corrected).wav"
 python dc_offset_correction.py --symmetry-strength 0.5 bass.wav
 ```
 
-### Symmetry correction by amplitude scaling (if phase doesn't suit your material)
+### Symmetry correction by amplitude scaling (if phase doesn't suit your material) with a smoothing filter of 2.0
 ```bash
-python dc_offset_correction.py --symmetry rms track.wav
+# The smoothing filter applies a window size of 96 samples in a 48kHz file
+python dc_offset_correction.py --symmetry rms --smoothing 2 track.wav
 ```
 
 ## Example Output
@@ -145,14 +146,14 @@ Dry-run: would write Drums (Stereo) (DC-Corrected).wav
 4. **Symmetry Analysis**: Computes RMS and peak of positive vs negative samples
 5. **Symmetry Correction** (if enabled, one of):
    - **Phase rotation** (`--symmetry phase`, recommended): Uses the Hilbert transform to create an analytic signal, then searches for the optimal rotation angle θ that minimizes the RMS difference between positive and negative amplitudes. The rotated signal is: `y(t) = x(t)·cos(θ) − H{x(t)}·sin(θ)`. This changes the waveform shape without altering frequency content or adding harmonics.
-   - **Amplitude scaling** (`--symmetry rms` or `peak`): Scales positive or negative samples to match, with smooth tanh blending near zero crossings. Simpler but mathematically equivalent to a piecewise-linear transfer function, which adds even-order harmonic distortion.
+   - **Amplitude scaling** (`--symmetry rms` or `peak`): Scales positive or negative samples to match. Uses time-domain smoothing of the polarity signal near zero crossings (controlled by `--smoothing`) to avoid harmonic distortion from abrupt slope changes. Still introduces some artifacts compared to phase rotation. Bigger smoothing factors may reduce high frequencies.
 6. **Clipping**: Output is clipped to [-1, 1] to prevent overflow
 
 ### Why Phase Rotation for asymmetry correction?
 
 Waveform asymmetry often originates from phase relationships between harmonics rather than true amplitude differences. For example, a bass guitar's second harmonic might be slightly phase-shifted relative to the fundamental due to pickup mechanics. Phase rotation finds an angle *theta* that "unwinds" this, making the waveform more symmetric without changing what frequencies are present.
 
-Note that the `--symmetry-strength` parameter controls the impact if the symmetry correction. By default, full correction is applied (1.0), but you may pick any coefficient that suits your purpose. In `phase` mode, the parameter is used for interpolation on the angle *theta* (0.0 for no shift, 1.0 for full shift by *theta*).
+Note that the `--symmetry-strength` parameter controls the impact of the symmetry correction. By default, full correction is applied (1.0), but you may pick any coefficient that suits your purpose. In `phase` mode, the parameter is used for interpolation on the angle *theta* (0.0 for no shift, 1.0 for full shift by *theta*).
 
 **Tip:** The optimization finds a local minimum. For severely asymmetric signals, **running the tool multiple times** on the output can yield progressively better results. Listen and experiment!
 

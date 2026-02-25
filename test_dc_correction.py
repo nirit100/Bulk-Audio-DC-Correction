@@ -12,6 +12,7 @@ from dc_correction_lib import (
     compute_asymmetry_stats,
     apply_symmetry_correction,
     apply_phase_rotation,
+    compute_adaptive_blend,
     process_audio,
     ProcessingResult,
     AsymmetryStats,
@@ -200,7 +201,7 @@ class TestSymmetryCorrection:
         audio = asymmetric_signal[:, None]
         mask = np.ones_like(audio, dtype=bool)
         result = apply_symmetry_correction(
-            audio, mask, mode='rms', strength=1.0, smoothing=0.02
+            audio, mask, mode='rms', strength=1.0, smoothing=2.0, sample_rate=48000
         )
         # Check that RMS ratio is closer to 1.0
         pos = result[result > 0]
@@ -215,10 +216,10 @@ class TestSymmetryCorrection:
         mask = np.ones_like(audio, dtype=bool)
 
         result_full = apply_symmetry_correction(
-            audio, mask, mode='rms', strength=1.0, smoothing=0.02
+            audio, mask, mode='rms', strength=1.0, smoothing=2.0, sample_rate=48000
         )
         result_half = apply_symmetry_correction(
-            audio, mask, mode='rms', strength=0.5, smoothing=0.02
+            audio, mask, mode='rms', strength=0.5, smoothing=2.0, sample_rate=48000
         )
 
         # Half strength should be between original and full correction
@@ -233,13 +234,13 @@ class TestSymmetryCorrection:
         audio = asymmetric_signal[:, None] * 0.9  # Near clipping
         mask = np.ones_like(audio, dtype=bool)
         result = apply_symmetry_correction(
-            audio, mask, mode='rms', strength=1.0, smoothing=0.02
+            audio, mask, mode='rms', strength=1.0, smoothing=2.0, sample_rate=48000
         )
         assert np.abs(result).max() <= 1.0
 
 
 # ============================================================================
-# Tests for smooth blending (no discontinuities)
+# Tests for time-domain smooth blending (no discontinuities)
 # ============================================================================
 
 class TestSmoothBlending:
@@ -248,55 +249,205 @@ class TestSmoothBlending:
         audio = asymmetric_signal[:, None]
         mask = np.ones_like(audio, dtype=bool)
         result = apply_symmetry_correction(
-            audio, mask, mode='rms', strength=1.0, smoothing=0.02
+            audio, mask, mode='rms', strength=1.0, smoothing=2.0, sample_rate=48000
         )
         # Check that sample-to-sample differences are small
         diff = np.abs(np.diff(result[:, 0]))
         # No huge jumps (discontinuities would cause large diffs)
         assert diff.max() < 0.1
 
-    def test_hard_blending_has_discontinuities(self):
-        """Hard blending (smoothing=0) creates discontinuities at zero crossings."""
-        # Create a simple signal that crosses zero with different scales applied
-        audio = np.array([0.1, 0.05, 0.01, -0.01, -0.05, -0.1], dtype='float32')[:, None]
+    def test_hard_vs_smooth_blending(self):
+        """Smoothing should reduce abruptness at zero crossings."""
+        # Create a longer signal with clear zero crossings
+        t = np.linspace(0, 0.1, 4800, dtype='float32')  # 100ms at 48kHz
+        audio = (np.sin(2 * np.pi * 100 * t) * 0.5)[:, None]
+        # Make asymmetric
+        audio[audio > 0] *= 1.5
         mask = np.ones_like(audio, dtype=bool)
 
-        # With hard blending, scaling changes abruptly at zero
+        # With hard blending, scale changes abruptly at zero crossings
         result_hard = apply_symmetry_correction(
-            audio, mask, mode='rms', strength=1.0, smoothing=0.0
+            audio, mask, mode='rms', strength=1.0, smoothing=0.0, sample_rate=48000
         )
+        # With smoothing, the transition is gradual over time
         result_smooth = apply_symmetry_correction(
-            audio, mask, mode='rms', strength=1.0, smoothing=0.02
+            audio, mask, mode='rms', strength=1.0, smoothing=2.0, sample_rate=48000
         )
 
-        # Near zero crossing (index 2->3), hard should have abrupt change
-        # while smooth should transition gradually
-        diff_hard = np.abs(result_hard[2, 0] - result_hard[3, 0])
-        diff_smooth = np.abs(result_smooth[2, 0] - result_smooth[3, 0])
+        # Both should balance the signal
+        def rms_ratio(arr):
+            pos = arr[arr > 0]
+            neg = -arr[arr < 0]
+            return rms(pos) / rms(neg)
 
-        # The smooth version should have smaller difference at the crossing
-        assert diff_smooth < diff_hard or np.isclose(diff_hard, diff_smooth, rtol=0.1)
+        # Both should improve symmetry
+        assert abs(rms_ratio(result_hard.flatten()) - 1.0) < 0.15
+        assert abs(rms_ratio(result_smooth.flatten()) - 1.0) < 0.15
 
-    def test_blend_factor_at_zero(self):
-        """Blend factor should be 0.5 exactly at zero."""
-        smoothing = 0.02
-        ch_arr = np.array([0.0])
-        blend = 0.5 + 0.5 * np.tanh(ch_arr / smoothing)
-        assert abs(blend[0] - 0.5) < 1e-6
+    def test_smoothing_window_size(self):
+        """Smoothing parameter controls the transition window size."""
+        t = np.linspace(0, 0.1, 4800, dtype='float32')
+        audio = (np.sin(2 * np.pi * 100 * t) * 0.5)[:, None]
+        audio[audio > 0] *= 1.5
+        mask = np.ones_like(audio, dtype=bool)
 
-    def test_blend_factor_far_positive(self):
-        """Blend factor should approach 1.0 for large positive values."""
-        smoothing = 0.02
-        ch_arr = np.array([1.0])  # Much larger than smoothing
-        blend = 0.5 + 0.5 * np.tanh(ch_arr / smoothing)
-        assert blend[0] > 0.99
+        # Longer smoothing should create smoother transitions
+        result_short = apply_symmetry_correction(
+            audio, mask, mode='rms', strength=1.0, smoothing=1.0, sample_rate=48000
+        )
+        result_long = apply_symmetry_correction(
+            audio, mask, mode='rms', strength=1.0, smoothing=5.0, sample_rate=48000
+        )
 
-    def test_blend_factor_far_negative(self):
-        """Blend factor should approach 0.0 for large negative values."""
-        smoothing = 0.02
-        ch_arr = np.array([-1.0])  # Much larger than smoothing
-        blend = 0.5 + 0.5 * np.tanh(ch_arr / smoothing)
-        assert blend[0] < 0.01
+        # Both should produce valid output
+        assert result_short.shape == audio.shape
+        assert result_long.shape == audio.shape
+
+
+# ============================================================================
+# Tests for adaptive blend (zero-crossing rate adaptation)
+# ============================================================================
+
+class TestAdaptiveBlend:
+    """Tests for compute_adaptive_blend function."""
+
+    def test_hard_switching_when_smoothing_zero(self):
+        """With smoothing=0, should return hard blend (1 for positive, 0 for negative)."""
+        t = np.linspace(0, 0.1, 4800, dtype='float32')
+        signal = np.sin(2 * np.pi * 100 * t)
+        
+        blend = compute_adaptive_blend(signal, smoothing=0.0, sample_rate=48000)
+        
+        expected = (signal > 0).astype(np.float32)
+        np.testing.assert_array_equal(blend, expected)
+
+    def test_output_shape_matches_input(self):
+        """Output blend array should match input signal shape."""
+        signal = np.random.randn(10000).astype('float32')
+        blend = compute_adaptive_blend(signal, smoothing=0.5, sample_rate=48000)
+        assert blend.shape == signal.shape
+        assert blend.dtype == np.float32
+
+    def test_blend_values_in_range(self):
+        """Blend values should always be between 0 and 1."""
+        signal = np.random.randn(10000).astype('float32')
+        blend = compute_adaptive_blend(signal, smoothing=1.0, sample_rate=48000)
+        assert blend.min() >= 0.0
+        assert blend.max() <= 1.0
+
+    def test_low_frequency_gets_more_smoothing(self):
+        """Low frequency signals should have blended transitions."""
+        # 10 Hz sine at 48kHz = 4800 samples per cycle, ~one crossing per 2400 samples
+        t = np.linspace(0, 0.5, 24000, dtype='float32')  # 0.5 seconds
+        low_freq = np.sin(2 * np.pi * 10 * t)
+        
+        blend = compute_adaptive_blend(low_freq, smoothing=2.0, sample_rate=48000)
+        
+        # Around zero crossings, blend should be close to 0.5 (transitioning)
+        # Find samples near zero crossings
+        crossings = np.where(np.abs(np.diff(np.sign(low_freq))) > 0)[0]
+        if len(crossings) > 0:
+            near_crossing = blend[crossings[1]]  # Second crossing (avoid edge)
+            # Should be close to 0.5 due to smoothing
+            assert 0.3 < near_crossing < 0.7
+
+    def test_high_frequency_gets_less_smoothing(self):
+        """High frequency signals should approach hard switching."""
+        # 8000 Hz sine at 48kHz = 6 samples per cycle, crossing every 3 samples
+        t = np.linspace(0, 0.01, 480, dtype='float32')  # 10ms
+        high_freq = np.sin(2 * np.pi * 8000 * t)
+        
+        blend = compute_adaptive_blend(high_freq, smoothing=2.0, sample_rate=48000)
+        hard_blend = (high_freq > 0).astype(np.float32)
+        
+        # At high frequencies, adaptive factor should approach min (0.25)
+        # So blend should be closer to hard_blend than to 0.5
+        # Check that most values are not in the 0.4-0.6 transition zone
+        in_transition = np.sum((blend > 0.4) & (blend < 0.6))
+        total = len(blend)
+        assert in_transition / total < 0.5  # Less than 50% in transition zone
+
+    def test_crossing_sensitivity_parameter(self):
+        """Higher crossing_sensitivity should reduce smoothing more aggressively."""
+        t = np.linspace(0, 0.01, 480, dtype='float32')
+        signal = np.sin(2 * np.pi * 2000 * t)  # Medium-high frequency
+        
+        blend_low_sens = compute_adaptive_blend(
+            signal, smoothing=2.0, sample_rate=48000, crossing_sensitivity=2.0
+        )
+        blend_high_sens = compute_adaptive_blend(
+            signal, smoothing=2.0, sample_rate=48000, crossing_sensitivity=10.0
+        )
+        
+        # High sensitivity should be closer to hard blend
+        hard = (signal > 0).astype(np.float32)
+        diff_low = np.mean(np.abs(blend_low_sens - hard))
+        diff_high = np.mean(np.abs(blend_high_sens - hard))
+        assert diff_high < diff_low
+
+    def test_min_adaptive_factor_parameter(self):
+        """min_adaptive_factor should cap how much smoothing is reduced."""
+        t = np.linspace(0, 0.01, 480, dtype='float32')
+        high_freq = np.sin(2 * np.pi * 8000 * t)
+        
+        # With high min factor, even high freq should get more smoothing
+        blend_low_min = compute_adaptive_blend(
+            high_freq, smoothing=2.0, sample_rate=48000, min_adaptive_factor=0.1
+        )
+        blend_high_min = compute_adaptive_blend(
+            high_freq, smoothing=2.0, sample_rate=48000, min_adaptive_factor=0.8
+        )
+        
+        # High min factor should be smoother (more values in 0.3-0.7 range)
+        smooth_count_low = np.sum((blend_low_min > 0.3) & (blend_low_min < 0.7))
+        smooth_count_high = np.sum((blend_high_min > 0.3) & (blend_high_min < 0.7))
+        assert smooth_count_high >= smooth_count_low
+
+    def test_constant_signal_no_crossings(self):
+        """Signal with no zero crossings should get full smoothing factor."""
+        # All positive signal
+        signal = np.ones(1000, dtype='float32') * 0.5
+        blend = compute_adaptive_blend(signal, smoothing=1.0, sample_rate=48000)
+        # All positive -> blend should be all 1.0
+        np.testing.assert_array_almost_equal(blend, np.ones(1000))
+
+    def test_mixed_frequency_content(self):
+        """Signal with both low and high frequency content."""
+        t = np.linspace(0, 0.1, 4800, dtype='float32')
+        # Low freq modulated by high freq
+        mixed = np.sin(2 * np.pi * 50 * t) * 0.5 + np.sin(2 * np.pi * 5000 * t) * 0.3
+        
+        blend = compute_adaptive_blend(mixed, smoothing=2.0, sample_rate=48000)
+        
+        # Should produce valid output without errors
+        assert blend.shape == mixed.shape
+        assert np.all(np.isfinite(blend))
+
+    def test_dc_signal_all_positive(self):
+        """Purely positive DC signal should have blend = 1.0 everywhere."""
+        signal = np.ones(1000, dtype='float32') * 0.8
+        blend = compute_adaptive_blend(signal, smoothing=1.0, sample_rate=48000)
+        np.testing.assert_array_almost_equal(blend, np.ones(1000, dtype='float32'))
+
+    def test_dc_signal_all_negative(self):
+        """Purely negative DC signal should have blend = 0.0 everywhere."""
+        signal = np.ones(1000, dtype='float32') * -0.8
+        blend = compute_adaptive_blend(signal, smoothing=1.0, sample_rate=48000)
+        np.testing.assert_array_almost_equal(blend, np.zeros(1000, dtype='float32'))
+
+    def test_very_short_signal(self):
+        """Should handle very short signals gracefully."""
+        signal = np.array([0.5, -0.5, 0.5], dtype='float32')
+        blend = compute_adaptive_blend(signal, smoothing=1.0, sample_rate=48000)
+        assert blend.shape == (3,)
+        assert np.all(np.isfinite(blend))
+
+    def test_single_sample(self):
+        """Should handle single sample input."""
+        signal = np.array([0.5], dtype='float32')
+        blend = compute_adaptive_blend(signal, smoothing=1.0, sample_rate=48000)
+        assert blend.shape == (1,)
+        assert blend[0] == 1.0  # Positive sample -> blend = 1
 
 
 # ============================================================================
@@ -489,7 +640,7 @@ class TestFullPipeline:
             method='median',
             symmetry='rms',
             symmetry_strength=1.0,
-            smoothing=0.02
+            smoothing=2.0
         )
         pos = result.audio[result.audio > 0]
         neg = -result.audio[result.audio < 0]

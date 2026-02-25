@@ -194,12 +194,85 @@ def compute_channel_stats(audio: np.ndarray, mask: np.ndarray, ch: int = 0) -> C
     )
 
 
+def compute_adaptive_blend(
+    signal: np.ndarray,
+    smoothing: float = 0.5,
+    sample_rate: int = 48000,
+    crossing_sensitivity: float = 6.0,
+    min_adaptive_factor: float = 0.25,
+) -> np.ndarray:
+    """
+    Compute per-sample blend factor with adaptive smoothing based on zero-crossing rate.
+
+    At low frequencies (few zero crossings), applies full smoothing for gradual transitions.
+    At high frequencies (many zero crossings), reduces smoothing to preserve waveform shape.
+
+    Args:
+        signal: 1D audio signal array
+        smoothing: Base smoothing factor. Window = smoothing * sample_rate / 1000 samples.
+                   At 48kHz: 0.5 -> 24 samples, 1.0 -> 48 samples.
+        sample_rate: Audio sample rate in Hz
+        crossing_sensitivity: How much zero crossings reduce smoothing (default 6.0).
+                              Higher values = more aggressive reduction at high frequencies.
+        min_adaptive_factor: Minimum blend factor towards smoothed signal (default 0.25).
+                             At high frequencies, blends this much smoothed + rest hard.
+
+    Returns:
+        Per-sample blend factor (0.0 to 1.0):
+        - 1.0 = apply positive scale factor
+        - 0.0 = apply negative scale factor
+    """
+    from scipy.ndimage import uniform_filter1d
+
+    if smoothing <= 0 or sample_rate <= 0:
+        # Hard switching: 1 for positive, 0 for negative/zero
+        return (signal > 0).astype(np.float32)
+
+    # Calculate window size from smoothing parameter
+    window = max(3, int(smoothing * sample_rate / 1000))
+    # Make window odd for symmetry
+    if window % 2 == 0:
+        window += 1
+
+    # Create polarity signal: +1 for positive, -1 for negative, 0 at zero
+    sign_signal = np.sign(signal).astype(np.float32)
+
+    # Detect zero crossings (where sign changes)
+    sign_diff = np.abs(np.diff(sign_signal))
+    crossings = sign_diff > 0
+    crossings = np.concatenate([[False], crossings])  # Pad to original length
+
+    # Compute local crossing density (crossings per sample in window)
+    crossing_density = uniform_filter1d(
+        crossings.astype(np.float32), size=window, mode='nearest'
+    )
+
+    # Adaptive factor: reduce smoothing when crossing rate is high
+    # density=0 → factor=1.0 (full smoothing)
+    # density=0.5 (Nyquist-like) → factor≈0.25 (mostly hard switching)
+    adaptive_factor = 1.0 / (1.0 + crossing_density * crossing_sensitivity)
+    adaptive_factor = np.clip(adaptive_factor, min_adaptive_factor, 1.0)
+
+    # Compute smoothed polarity via uniform filter
+    smoothed_sign = uniform_filter1d(sign_signal, size=window, mode='nearest')
+
+    # Convert to blend factors (0-1 range)
+    hard_blend = (signal > 0).astype(np.float32)
+    smooth_blend = (smoothed_sign + 1.0) / 2.0
+
+    # Mix based on adaptive factor: more smoothing at low freq, less at high freq
+    blend = adaptive_factor * smooth_blend + (1.0 - adaptive_factor) * hard_blend
+
+    return blend.astype(np.float32)
+
+
 def apply_symmetry_correction(
     audio: np.ndarray,
     mask: np.ndarray,
     mode: str = 'rms',
     strength: float = 1.0,
-    smoothing: float = 0.02
+    smoothing: float = 0.5,
+    sample_rate: int = 48000
 ) -> np.ndarray:
     """
     Apply symmetry correction to balance positive/negative amplitudes.
@@ -209,7 +282,11 @@ def apply_symmetry_correction(
         mask: Boolean mask for gated samples
         mode: 'rms' or 'peak'
         strength: Correction strength 0..1
-        smoothing: Transition width for smooth blending (0 = hard switch)
+        smoothing: Smoothing factor for blending near zero crossings.
+                   Window size = smoothing * sample_rate / 1000 samples.
+                   At 48kHz: 0.5 -> 24 samples, 1.0 -> 48 samples.
+                   Set to 0 for hard switching.
+        sample_rate: Audio sample rate
 
     Returns:
         Corrected audio (same shape)
@@ -259,11 +336,12 @@ def apply_symmetry_correction(
         else:
             scale_pos, scale_neg = 1.0, 1.0
 
-        # Apply smooth blending to avoid discontinuities
-        if smoothing > 0:
-            blend = 0.5 + 0.5 * np.tanh(ch_arr / smoothing)
-        else:
-            blend = (ch_arr > 0).astype(float)
+        # Scale smoothing by correction magnitude: small correction = less smoothing needed
+        scale_diff = abs(scale_pos - scale_neg)
+        effective_smoothing = smoothing * min(1.0, scale_diff * 2.0)  # Full at diff >= 0.5
+
+        # Compute per-sample blend factor with adaptive zero-crossing smoothing
+        blend = compute_adaptive_blend(ch_arr, effective_smoothing, sample_rate)
 
         per_sample_scale = scale_pos * blend + scale_neg * (1.0 - blend)
         arr[:, ch] = ch_arr * per_sample_scale
@@ -415,7 +493,8 @@ def process_audio(
         else:
             # Amplitude scaling (rms/peak modes)
             corrected = apply_symmetry_correction(
-                corrected, mask, symmetry, symmetry_strength, smoothing
+                corrected, mask, symmetry, symmetry_strength, smoothing,
+                sample_rate=sample_rate or 48000
             )
 
     # Post-correction stats (recompute asymmetry on corrected audio)

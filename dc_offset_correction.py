@@ -18,7 +18,7 @@ def main():
     parser.add_argument('--method', choices=['mean', 'median'], default='median', help='DC offset estimation method (median is more robust to outliers; default: median)')
     parser.add_argument('--symmetry', choices=['none', 'rms', 'peak', 'phase'], default='none', help='Symmetry correction method: none=disabled, rms/peak=amplitude scaling (can distort), phase=Hilbert transform rotation (no distortion); default: none')
     parser.add_argument('--symmetry-strength', type=float, default=1.0, help='Strength of symmetry correction (recommended range is 0..1; default: 1.0)')
-    parser.add_argument('--smoothing', type=float, default=0.02, help='Amplitude range for symmetry blending near zero, as fraction of full-scale (mitigates non-continuous curves when symmetry correcting) (0..1; default: 0.02)')
+    parser.add_argument('--smoothing', type=float, default=0.5, help='Smoothing factor for blending near zero crossings in rms/peak modes. Window = smoothing * sample_rate / 1000 samples (default: 0.5, i.e. 24 samples at 48kHz)')
     args = parser.parse_args()
 
     for path in args.files:
