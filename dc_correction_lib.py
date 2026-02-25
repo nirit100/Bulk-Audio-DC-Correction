@@ -3,6 +3,8 @@ DC Offset Correction Library
 Core functions for DC removal, symmetry correction, and diagnostics.
 """
 import numpy as np
+from scipy.signal import hilbert
+from scipy.optimize import minimize_scalar
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -269,6 +271,88 @@ def apply_symmetry_correction(
     return arr
 
 
+def apply_phase_rotation(
+    audio: np.ndarray,
+    mask: np.ndarray,
+    mode: str = 'rms',
+    strength: float = 1.0,
+) -> np.ndarray:
+    """
+    Apply phase rotation to balance positive/negative amplitudes.
+
+    This uses the Hilbert transform to rotate the signal's phase,
+    which changes the waveform shape without adding harmonic distortion.
+
+    Args:
+        audio: 2D array (samples, channels), DC already removed
+        mask: Boolean mask for gated samples (used for measuring asymmetry)
+        mode: 'rms' or 'peak' - metric to optimize
+        strength: Correction strength 0..1 (interpolate between 0 and optimal angle)
+
+    Returns:
+        Phase-rotated audio (same shape)
+    """
+    if strength <= 0:
+        return audio.copy()
+
+    arr = audio.copy()
+    nch = arr.shape[1]
+
+    for ch in range(nch):
+        ch_arr = arr[:, ch]
+        ch_mask = mask[:, ch]
+
+        # Compute analytic signal (Hilbert transform)
+        analytic = hilbert(ch_arr)
+        hilbert_component = np.imag(analytic)
+
+        def asymmetry_metric(theta: float) -> float:
+            """
+            Compute asymmetry after rotating by theta radians.
+            We want to minimize | metric_pos - metric_neg |.
+            """
+            rotated = ch_arr * np.cos(theta) - hilbert_component * np.sin(theta)
+            gated = rotated[ch_mask]
+            pos = gated[gated > 0]
+            neg = -gated[gated < 0]
+
+            if pos.size == 0 or neg.size == 0:
+                return float('inf')
+
+            if mode == 'rms':
+                pos_metric = rms(pos)
+                neg_metric = rms(neg)
+            else:  # peak
+                pos_metric = float(pos.max())
+                neg_metric = float(neg.max())
+
+            if neg_metric <= 0:
+                return float('inf')
+
+            # Minimize deviation from ratio=1
+            ratio = pos_metric / neg_metric
+            return abs(ratio - 1.0)
+
+        # Search for optimal angle in range [-pi/2, pi/2]
+        # (full rotation would be -pi to pi, but symmetry means we only need half)
+        result = minimize_scalar(
+            asymmetry_metric,
+            bounds=(-np.pi / 2, np.pi / 2),
+            method='bounded',
+            options={'xatol': 1e-4}
+        )
+
+        optimal_theta = result.x if result.success else 0.0
+
+        # Apply strength (interpolate between 0 and optimal angle)
+        theta = optimal_theta * strength
+
+        # Apply rotation: y = x*cos(θ) - H(x)*sin(θ)
+        arr[:, ch] = ch_arr * np.cos(theta) - hilbert_component * np.sin(theta)
+
+    return arr
+
+
 # =============================================================================
 # Main Processing Pipeline
 # =============================================================================
@@ -290,9 +374,13 @@ def process_audio(
         audio: 1D or 2D audio array
         threshold_db: Gate threshold in dB
         method: DC estimation method ('mean' or 'median')
-        symmetry: Symmetry correction mode ('none', 'rms', 'peak')
+        symmetry: Symmetry correction mode:
+            - 'none': No symmetry correction
+            - 'rms': Amplitude scaling to balance RMS (can add harmonic distortion)
+            - 'peak': Amplitude scaling to balance peaks (can add harmonic distortion)
+            - 'phase': Phase rotation via Hilbert transform (no harmonic distortion)
         symmetry_strength: Strength of symmetry correction (0..1)
-        smoothing: Transition width for smooth blending
+        smoothing: Transition width for smooth blending (amplitude modes only)
         use_gate: Whether to use gating
         sample_rate: Optional sample rate for metadata
 
@@ -319,9 +407,16 @@ def process_audio(
 
     # Apply symmetry correction
     if symmetry != 'none' and symmetry_strength > 0:
-        corrected = apply_symmetry_correction(
-            corrected, mask, symmetry, symmetry_strength, smoothing
-        )
+        if symmetry == 'phase':
+            # Phase rotation - no harmonic distortion
+            corrected = apply_phase_rotation(
+                corrected, mask, mode='rms', strength=symmetry_strength
+            )
+        else:
+            # Amplitude scaling (rms/peak modes)
+            corrected = apply_symmetry_correction(
+                corrected, mask, symmetry, symmetry_strength, smoothing
+            )
 
     # Post-correction stats (recompute asymmetry on corrected audio)
     post_stats = [compute_channel_stats(corrected, mask, ch) for ch in range(nch)]

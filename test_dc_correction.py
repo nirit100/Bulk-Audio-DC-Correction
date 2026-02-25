@@ -11,6 +11,7 @@ from dc_correction_lib import (
     rms,
     compute_asymmetry_stats,
     apply_symmetry_correction,
+    apply_phase_rotation,
     process_audio,
     ProcessingResult,
     AsymmetryStats,
@@ -296,6 +297,172 @@ class TestSmoothBlending:
         ch_arr = np.array([-1.0])  # Much larger than smoothing
         blend = 0.5 + 0.5 * np.tanh(ch_arr / smoothing)
         assert blend[0] < 0.01
+
+
+# ============================================================================
+# Tests for phase rotation symmetry correction
+# ============================================================================
+
+class TestPhaseRotation:
+    def test_no_correction_when_strength_zero(self, asymmetric_signal):
+        """Strength 0 should return unchanged audio."""
+        audio = asymmetric_signal[:, None]
+        mask = np.ones_like(audio, dtype=bool)
+        result = apply_phase_rotation(audio, mask, mode='rms', strength=0.0)
+        np.testing.assert_array_equal(result, audio)
+
+    def test_phase_rotation_balances_rms(self, asymmetric_signal):
+        """Phase rotation should balance pos/neg RMS."""
+        audio = asymmetric_signal[:, None]
+        mask = np.ones_like(audio, dtype=bool)
+        result = apply_phase_rotation(audio, mask, mode='rms', strength=1.0)
+
+        # Check that RMS ratio is closer to 1.0
+        pos = result[result > 0]
+        neg = -result[result < 0]
+        ratio_after = rms(pos) / rms(neg)
+        # Original ratio was ~1.5, should be closer to 1.0 now
+        assert abs(ratio_after - 1.0) < 0.15
+
+    def test_phase_rotation_preserves_rms(self, asymmetric_signal):
+        """Phase rotation should not significantly change overall RMS."""
+        audio = asymmetric_signal[:, None]
+        mask = np.ones_like(audio, dtype=bool)
+        result = apply_phase_rotation(audio, mask, mode='rms', strength=1.0)
+
+        # Total RMS should be very similar (phase rotation preserves energy)
+        # Allow up to 5% change since heavily asymmetric signals can shift slightly
+        rms_before = rms(audio.flatten())
+        rms_after = rms(result.flatten())
+        assert abs(rms_after - rms_before) / rms_before < 0.05
+
+    def test_phase_rotation_partial_strength(self, asymmetric_signal):
+        """Partial strength should give intermediate result."""
+        audio = asymmetric_signal[:, None]
+        mask = np.ones_like(audio, dtype=bool)
+
+        result_full = apply_phase_rotation(audio, mask, mode='rms', strength=1.0)
+        result_half = apply_phase_rotation(audio, mask, mode='rms', strength=0.5)
+
+        # Compute asymmetry ratios
+        def asymmetry_ratio(arr):
+            pos = arr[arr > 0]
+            neg = -arr[arr < 0]
+            return rms(pos) / rms(neg)
+
+        ratio_orig = asymmetry_ratio(audio.flatten())
+        ratio_full = asymmetry_ratio(result_full.flatten())
+        ratio_half = asymmetry_ratio(result_half.flatten())
+
+        # Half strength should be between original and full
+        # (closer to 1.0 than original, but not as close as full)
+        dist_orig = abs(ratio_orig - 1.0)
+        dist_full = abs(ratio_full - 1.0)
+        dist_half = abs(ratio_half - 1.0)
+        assert dist_full < dist_half < dist_orig
+
+    def test_phase_rotation_symmetric_signal_unchanged(self, sine_wave):
+        """Symmetric signal should remain mostly unchanged."""
+        audio = sine_wave[:, None]
+        mask = np.ones_like(audio, dtype=bool)
+        result = apply_phase_rotation(audio, mask, mode='rms', strength=1.0)
+
+        # RMS should be nearly identical
+        rms_before = rms(audio.flatten())
+        rms_after = rms(result.flatten())
+        assert abs(rms_after - rms_before) / rms_before < 0.01
+
+    def test_phase_rotation_no_clipping(self, asymmetric_signal):
+        """Phase rotation should not cause clipping."""
+        audio = asymmetric_signal[:, None] * 0.9  # Near full scale
+        mask = np.ones_like(audio, dtype=bool)
+        result = apply_phase_rotation(audio, mask, mode='rms', strength=1.0)
+        # Phase rotation preserves amplitude envelope, so no clipping expected
+        assert np.abs(result).max() <= 1.0 + 1e-6
+
+    def test_phase_rotation_peak_mode(self, asymmetric_signal):
+        """Peak mode should also balance the signal."""
+        audio = asymmetric_signal[:, None]
+        mask = np.ones_like(audio, dtype=bool)
+        result = apply_phase_rotation(audio, mask, mode='peak', strength=1.0)
+
+        # Check that peak ratio is closer to 1.0
+        pos_peak = result[result > 0].max()
+        neg_peak = (-result[result < 0]).max()
+        ratio_after = pos_peak / neg_peak
+        # Should be improved from original ~1.5
+        assert abs(ratio_after - 1.0) < 0.3
+
+    def test_phase_rotation_multichannel(self, asymmetric_signal):
+        """Phase rotation should work on multichannel audio."""
+        # Create stereo with different asymmetry per channel
+        ch1 = asymmetric_signal.copy()
+        ch2 = -asymmetric_signal  # Inverted
+        audio = np.column_stack([ch1, ch2])
+        mask = np.ones_like(audio, dtype=bool)
+
+        result = apply_phase_rotation(audio, mask, mode='rms', strength=1.0)
+
+        # Both channels should be processed
+        assert result.shape == audio.shape
+        # Each channel should have improved symmetry
+        for ch in range(2):
+            pos = result[result[:, ch] > 0, ch]
+            neg = -result[result[:, ch] < 0, ch]
+            ratio = rms(pos) / rms(neg)
+            assert abs(ratio - 1.0) < 0.15
+
+
+# ============================================================================
+# Tests for phase mode in full pipeline
+# ============================================================================
+
+class TestPhaseModeInPipeline:
+    def test_process_audio_with_phase_symmetry(self, asymmetric_signal):
+        """process_audio should accept 'phase' symmetry mode."""
+        result = process_audio(
+            asymmetric_signal,
+            threshold_db=-70.0,
+            method='median',
+            symmetry='phase',
+            symmetry_strength=1.0,
+        )
+
+        # Should return valid result
+        assert isinstance(result, ProcessingResult)
+        assert result.symmetry == 'phase'
+
+        # Asymmetry should be improved
+        post_ratio = result.post_stats[0].asymmetry.ratio_rms
+        pre_ratio = result.pre_stats[0].asymmetry.ratio_rms
+        assert abs(post_ratio - 1.0) < abs(pre_ratio - 1.0)
+
+    def test_process_audio_phase_preserves_dc_removal(self, sine_with_dc):
+        """Phase mode should not interfere with DC removal."""
+        result = process_audio(
+            sine_with_dc,
+            threshold_db=-70.0,
+            method='mean',
+            symmetry='phase',
+        )
+        # DC should still be removed
+        assert abs(np.mean(result.audio)) < 0.01
+
+    def test_process_audio_phase_stereo(self):
+        """Phase mode should work with stereo audio."""
+        # Create asymmetric stereo signal
+        t = np.linspace(0, 1, 48000, dtype='float32')
+        mono = np.sin(2 * np.pi * 100 * t) * 0.5
+        mono[mono > 0] *= 1.5  # Make asymmetric
+        stereo = np.column_stack([mono, -mono])
+
+        result = process_audio(
+            stereo,
+            symmetry='phase',
+        )
+
+        assert result.audio.shape == stereo.shape
+        assert len(result.post_stats) == 2
 
 
 # ============================================================================
