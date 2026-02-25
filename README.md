@@ -7,12 +7,12 @@ A small Python tool for correcting **DC offset** and **amplitude asymmetry** in 
 ### DC Offset (Additive Bias)
 
 When the audio waveform isn't centered around zero. This can be caused by:
-- Faulty recording equipment or ADC converters
-- Analog hardware with calibration drift
+- Faulty recording equipment or ADC converters with bias voltage errors
+- Analog hardware with calibration drift or aging capacitors
 - Some synthesizers and audio interfaces
-- Magic or bad luck
+- Improper gain staging in the signal chain
 
-**Consequences:** Reduced headroom, clicks at edit points, asymmetric clipping, issues with some plugins.
+**Consequences:** Reduced headroom, clicks/pops at edit points, asymmetric clipping behavior, issues with some dynamics plugins.
 
 Top: Negative DC offset, Bottom: Same audio after running `python .\dc_offset_correction.py file.wav`
 <img width="1024" height="348" alt="image" src="https://github.com/user-attachments/assets/57843f8e-ad60-40d2-9661-8023c43ad98f" />
@@ -21,33 +21,31 @@ As long as no clipping is involved, this correction is pretty easy to do and mor
 
 ### Amplitude Asymmetry (Multiplicative Bias)
 
-When positive amplitudes are consistently larger (or smaller) than negative ones. Common in:
-- Bass guitar with asymmetric pickup response
-- Recordings through transformer-based preamps
-- Some speaker/microphone combinations
-- Magic or bad luck
+When positive amplitudes are consistently larger (or smaller) than negative ones. Common causes:
+- **Magnetic pickups** (bass/guitar): The pickup responds differently to string motion toward vs away from the magnet
+- **Dynamic microphones**: Voice coil and diaphragm mechanics can have asymmetric excursion characteristics
+- **Tube/valve equipment**: Operating point and saturation behavior can favor one polarity
+- **Some ribbon microphones**: Asymmetric ribbon tension or magnetic field
 
-**Consequences:** Wasted headroom (peak meters show higher than perceived loudness), potential for asymmetric distortion, mastering engineer will have a bad day.
+**Consequences:** Wasted headroom (peak meters show higher than perceived loudness), potential for asymmetric distortion when pushed, and your mastering engineer will have a bad day.
 
-Top: Bass signal with asymmatric amplitude, Bottom: Same audio after running `python .\dc_offset_correction.py --symmetry rms file.wav`:
+Top: Bass signal with asymmetric amplitude, Bottom: Same audio after running `python .\dc_offset_correction.py --symmetry phase file.wav`:
 <img width="945" height="297" alt="image" src="https://github.com/user-attachments/assets/5ec7aa49-42c9-4e4d-b9e1-6e96d5917a2c" />
-
-Use this with caution. The correction algorithms I provide are very basic and are good enough for me, but they may introduce subtle artifacts.
 
 ## Features
 
 - **DC offset removal** using mean or median estimation
-- Optional **Symmetry correction** to balance positive/negative amplitudes (RMS or peak-based)
+- Optional **phase rotation symmetry correction** — uses Hilbert transform to rotate waveform phase, balancing positive/negative amplitudes without adding harmonic distortion
+- Alternative **amplitude scaling** symmetry modes (RMS/peak-based) — simpler but can introduce subtle distortion
 - **Gated analysis** — ignores quiet sections for more accurate estimation, parameterized threshold
-- **Smooth blending** — avoids distortion at zero crossings when correcting asymmetry
 - **Dry-run mode** — preview diagnostics without writing files
 - **Preserves audio format** — maintains sample rate, bit depth, and file format
 
 ## Installation & Usage
 
-First, clone the repository. 
+First, clone the repository.
 
-Then isnstall dependencies:
+Then install dependencies:
 
 ```bash
 pip install -r requirements.txt
@@ -67,11 +65,11 @@ I will probably do a complete packaging later. Maybe. Who knows.
 |--------|---------|-------------|
 | `--dry-run` | off | Print stats but do not actually write files |
 | `--method {mean,median}` | `median` | DC offset estimation method (median is more robust to outliers) |
-| `--symmetry {none,rms,peak}` | `none` | DC asymmetry estimation and correction method (pick "none" to disable symmetry correction) |
-| `--symmetry-strength` | `1.0` | Strength of symmetry correction (recommended range is 0..1) |
-| `--smoothing` | `0.02` | Amplitude range for symmetry blending near zero, as fraction of full-scale (mitigates kink when symmetry correcting, disable with 0.0, be careful with bigger values on quiet audio) (0..1) |
+| `--symmetry {none,phase,rms,peak}` | `none` | Symmetry correction: `none` (disabled), `phase` (Hilbert transform, no distortion), `rms`/`peak` (amplitude scaling, can distort) |
+| `--symmetry-strength` | `1.0` | Strength of symmetry correction (0..1) |
+| `--smoothing` | `0.02` | Amplitude range for blending near zero (rms/peak modes only) |
 | `--threshold-db` | `-70` | Gate threshold in dB |
-| `--no-gate` | off | Disable gate and use all samples (basically sets threshold-db to -inf) |
+| `--no-gate` | off | Disable gate and use all samples |
 
 ## Examples
 
@@ -85,26 +83,38 @@ python dc_offset_correction.py track.wav
 python dc_offset_correction.py --dry-run *.wav
 ```
 
-### Full correction (DC + symmetry)
+### Full correction with phase rotation (recommended)
 ```bash
-python dc_offset_correction.py --symmetry rms track.wav
+python dc_offset_correction.py --symmetry phase track.wav
+```
+
+### Multiple passes for better symmetry
+```bash
+# Phase rotation finds a local optimum; running multiple times can improve results
+python dc_offset_correction.py --symmetry phase bass.wav
+python dc_offset_correction.py --symmetry phase "bass (DC-Corrected).wav"
 ```
 
 ### Conservative symmetry correction
 ```bash
-python dc_offset_correction.py --symmetry rms --symmetry-strength 0.5 bass.wav
+python dc_offset_correction.py --symmetry-strength 0.5 bass.wav
+```
+
+### Symmetry correction by amplitude scaling (if phase doesn't suit your material)
+```bash
+python dc_offset_correction.py --symmetry rms track.wav
 ```
 
 ## Example Output
 
 ```
-$ python3 ./dc_offset_correction.py --symmetry rms --method mean --dry-run "Djembe (Mono).wav" "Drums (Stereo).wav"
+$ python3 ./dc_offset_correction.py --symmetry phase --dry-run "Djembe (Mono).wav" "Drums (Stereo).wav"
 File: Djembe (Mono).wav
  SR: 48000
  Pre-mean: -0.000001  Pre-peak: 0.025983
  Gated-samples: 12000138 (80.257745%)  DC used: -0.000000
  Post-mean: 0.000000  Post-peak: 0.026052
- DC method: mean  Symmetry correction: rms  Gate: on (-70.0 dB)
+ DC method: mean  Symmetry correction: phase  Gate: on (-70.0 dB)
  Asymmetry mono: pos_count=6005700 neg_count=5994438 (previously pos=6005700 neg=5994438)
   mean-abs pos/neg: 0.001838 / 0.001840  ratio=0.998547 (-0.01 dB) (previously -0.02 dB)
   rms      pos/neg: 0.002371 / 0.002376  ratio=0.997787 (-0.02 dB) (previously -0.03 dB)
@@ -115,7 +125,7 @@ File: Drums (Stereo).wav
  Pre-mean: -0.000001, -0.000001  Pre-peak: 0.831722, 0.914206
  Gated-samples: 8730364, 8910128 (58.389272, 59.591546%)  DC used: 0.000000, -0.000000
  Post-mean: 0.000093, 0.000057  Post-peak: 0.831722, 0.914205
- DC method: mean  Symmetry correction: rms  Gate: on (-70.0 dB)
+ DC method: mean  Symmetry correction: phase  Gate: on (-70.0 dB)
  Asymmetry ch0: pos_count=4422471 neg_count=4307893 (previously pos=4422471 neg=4307893)
   mean-abs pos/neg: 0.021578 / 0.021827  ratio=0.988619 (-0.10 dB) (previously -0.23 dB)
   rms      pos/neg: 0.044165 / 0.044177  ratio=0.999719 (-0.00 dB) (previously -0.15 dB)
@@ -132,9 +142,19 @@ Dry-run: would write Drums (Stereo) (DC-Corrected).wav
 1. **Gating**: Samples below the threshold (default -70 dB) are excluded from analysis to avoid noise floor bias
 2. **DC Estimation**: Calculates the median (or mean) of gated samples as the DC offset
 3. **DC Removal**: Subtracts the estimated DC from all samples
-4. **Symmetry Analysis**: Computes RMS or peak of positive vs negative samples
-5. **Symmetry Correction**: Scales one side to match the other, using smooth tanh blending near zero to avoid discontinuities -- this is the part that is not perfect!
+4. **Symmetry Analysis**: Computes RMS and peak of positive vs negative samples
+5. **Symmetry Correction** (if enabled, one of):
+   - **Phase rotation** (`--symmetry phase`, recommended): Uses the Hilbert transform to create an analytic signal, then searches for the optimal rotation angle θ that minimizes the RMS difference between positive and negative amplitudes. The rotated signal is: `y(t) = x(t)·cos(θ) − H{x(t)}·sin(θ)`. This changes the waveform shape without altering frequency content or adding harmonics.
+   - **Amplitude scaling** (`--symmetry rms` or `peak`): Scales positive or negative samples to match, with smooth tanh blending near zero crossings. Simpler but mathematically equivalent to a piecewise-linear transfer function, which adds even-order harmonic distortion.
 6. **Clipping**: Output is clipped to [-1, 1] to prevent overflow
+
+### Why Phase Rotation for asymmetry correction?
+
+Waveform asymmetry often originates from phase relationships between harmonics rather than true amplitude differences. For example, a bass guitar's second harmonic might be slightly phase-shifted relative to the fundamental due to pickup mechanics. Phase rotation finds an angle that "unwinds" this, making the waveform more symmetric without changing what frequencies are present.
+
+**Tip:** The optimization finds a local minimum. For severely asymmetric signals, **running the tool multiple times** on the output can yield progressively better results. Listen and experiment!
+
+**Tip no. 2:** You might not need to correct the asymmetry at all.
 
 ## Testing
 

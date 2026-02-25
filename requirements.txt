@@ -1,2 +1,4 @@
 soundfile
 numpy
+scipy
+pytest
