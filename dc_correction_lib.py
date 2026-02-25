@@ -376,6 +376,13 @@ def format_array(a: np.ndarray, decimals: int = 6) -> str:
     return ", ".join(format_value(float(x), decimals) for x in np.atleast_1d(a))
 
 
+def format_int_array(a: np.ndarray) -> str:
+    """Format array values as integers for printing."""
+    if np.ndim(a) == 0:
+        return str(int(a))
+    return ", ".join(str(int(x)) for x in np.atleast_1d(a))
+
+
 def format_report(result: ProcessingResult, path: str = "") -> str:
     """
     Generate a human-readable report from processing result.
@@ -392,7 +399,7 @@ def format_report(result: ProcessingResult, path: str = "") -> str:
     if path:
         lines.append(f"File: {path}")
     if result.sample_rate:
-        lines.append(f" SR: {result.sample_rate}")
+        lines.append(f" SR: {int(result.sample_rate)}")
 
     # Pre/post summary
     pre_means = [s.mean for s in result.pre_stats]
@@ -401,7 +408,7 @@ def format_report(result: ProcessingResult, path: str = "") -> str:
     post_peaks = [s.peak for s in result.post_stats]
 
     lines.append(f" Pre-mean: {format_array(np.array(pre_means))}  Pre-peak: {format_array(np.array(pre_peaks))}")
-    lines.append(f" Gated-samples: {format_array(result.gated_samples)} ({format_array(result.gated_percent)}%)  DC used: {format_array(result.dc)}")
+    lines.append(f" Gated-samples: {format_int_array(result.gated_samples)} ({format_array(result.gated_percent)}%)  DC used: {format_array(result.dc)}")
     lines.append(f" Post-mean: {format_array(np.array(post_means))}  Post-peak: {format_array(np.array(post_peaks))}")
 
     gate_str = 'on' if result.use_gate else 'off'
@@ -412,7 +419,7 @@ def format_report(result: ProcessingResult, path: str = "") -> str:
         ch_label = "mono" if result.is_mono else f"ch{i}"
         post_a, pre_a = post.asymmetry, pre.asymmetry
 
-        lines.append(f" Asymmetry {ch_label}: pos_count={post_a.pos_count} neg_count={post_a.neg_count} (previously pos={pre_a.pos_count} neg={pre_a.neg_count})")
+        lines.append(f" Asymmetry {ch_label}: pos_count={int(post_a.pos_count)} neg_count={int(post_a.neg_count)} (previously pos={int(pre_a.pos_count)} neg={int(pre_a.neg_count)})")
         lines.append(f"  mean-abs pos/neg: {format_value(post_a.pos_meanabs)} / {format_value(post_a.neg_meanabs)}  ratio={format_value(post_a.ratio_meanabs)} ({post_a.ratio_meanabs_db:+.2f} dB) (previously {pre_a.ratio_meanabs_db:+.2f} dB)")
         lines.append(f"  rms      pos/neg: {format_value(post_a.pos_rms)} / {format_value(post_a.neg_rms)}  ratio={format_value(post_a.ratio_rms)} ({post_a.ratio_rms_db:+.2f} dB) (previously {pre_a.ratio_rms_db:+.2f} dB)")
         lines.append(f"  peak     pos/neg: {format_value(post_a.pos_peak)} / {format_value(post_a.neg_peak)}  ratio={format_value(post_a.ratio_peak)} ({post_a.ratio_peak_db:+.2f} dB) (previously {pre_a.ratio_peak_db:+.2f} dB)")
